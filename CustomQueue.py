@@ -41,8 +41,8 @@ class TrainingQueue():
 
         adv = torch.tensor([d['adv'] for d in self.queue])
 
-        self.adv_mean = adv.mean()
-        self.adv_std = adv.std()
+        # self.adv_mean = adv.mean()
+        # self.adv_std = adv.std()
 
     def get_batch(self, n):
         """ Pop a batch of n items from the queue """
@@ -60,7 +60,7 @@ class TrainingQueue():
             raise Exception()
 
 
-        result['adv'] = (result['adv'] - self.adv_mean) / self.adv_std
+        # result['adv'] = (result['adv'] - self.adv_mean) / self.adv_std
         
         return result
 
@@ -261,7 +261,7 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
     # Set up experience buffer
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
     buf = PPOTrajectory(gamma, lam)
-    training_queue = TrainingQueue(512)
+    training_queue = TrainingQueue(256)
 
     # Set up optimizers for policy and value function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
@@ -270,8 +270,6 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
     # Prepare for interaction with environment
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
-
-    batch_size = 8
 
     num_training = 7
 
