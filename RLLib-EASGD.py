@@ -1,3 +1,8 @@
+import os
+
+os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
+
+
 import logging
 from typing import List, Tuple
 import time
@@ -55,32 +60,15 @@ from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
 ray.init()
 
-config = ppo.DEFAULT_CONFIG.copy()
+config = a3c.DEFAULT_CONFIG.copy()
+# config = ppo.DEFAULT_CONFIG.copy()
+
 config["num_gpus"] = 0
-config["num_workers"] = 4
-config["num_envs_per_worker"] = 4
-config["rollout_fragment_length"] = 200
-
-
-def a3c_execution_plan(workers, config):
-    # For A3C, compute policy gradients remotely on the rollout workers.
-    grads = AsyncGradients(workers)
-
-    # Apply the gradients as they arrive. We set update_all to False so that
-    # only the worker sending the gradient is updated with new weights.
-    train_op = grads.for_each(ApplyGradients(workers, update_all=False))
-
-    return StandardMetricsReporting(train_op, workers, config)
-
-def flatten(d, parent_key='', sep='_'):
-    items = []
-    for k, v in d.items():
-        new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, collections.MutableMapping):
-            items.extend(flatten(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
+config["num_workers"] = 5
+config["sample_async"] = False
+config["num_envs_per_worker"] = 5
+# config["rollout_fragment_length"] = 100
+config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
 
 class EASGDUpdateLearnerWeights:
     def __init__(self, workers, moving_rate, num_workers, broadcast_interval):
@@ -113,12 +101,17 @@ class EASGDUpdateLearnerWeights:
             return params - self.alpha * diffs
 
     def __call__(self, item):
-        actor, batch = item
+        actor, (info, samples, training_steps) = item
+
+        metrics = _get_shared_metrics()
+
+        metrics.counters[STEPS_TRAINED_COUNTER] += training_steps
+        metrics.counters[STEPS_SAMPLED_COUNTER] += samples
 
         self.counters[actor] += 1
 
         if self.counters[actor] % self.broadcast_interval == 0:
-            metrics = _get_shared_metrics()
+            
             metrics.counters["num_weight_broadcasts"] += 1
 
             with metrics.timers[WORKER_UPDATE_TIMER]:
@@ -127,8 +120,8 @@ class EASGDUpdateLearnerWeights:
 
                 diff_dict = EASGDUpdateLearnerWeights.diff(local_weights, self.global_weights)
                 
-                #print(worker_idx)
-                #print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
+                # print(actor)
+                # print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
                 #print(local_weights["default_policy"]["default_policy/value_out/kernel"][:10])
                 #print(self.global_weights["default_policy"]["default_policy/value_out/kernel"][:10])
 
@@ -141,6 +134,40 @@ class EASGDUpdateLearnerWeights:
                 # Also update global vars of the local worker.
                 # self.workers.local_worker().set_global_vars(_get_global_vars())
 
+        return info
+
+class LocalEASGDUpdate(EASGDUpdateLearnerWeights):
+    def __init__(self, global_worker, moving_rate, num_workers, broadcast_interval):
+        self.total_steps = 0
+        self.broadcast_interval = broadcast_interval
+        self.alpha = moving_rate / num_workers
+        self.global_worker = global_worker
+
+    def __call__(self, item):
+
+        info, samples, training_steps = item
+
+        updated = False
+
+        if info['num_iterations_trained'] % self.broadcast_interval == 0: 
+            local_worker = get_global_worker()
+
+            local_weights = local_worker.get_weights()
+            global_weights = ray.get(self.global_worker.get_weights.remote())
+
+            diff_dict = EASGDUpdateLearnerWeights.diff(local_weights, global_weights)
+
+            #print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
+            
+            local_weights = self.easgd_subtract(local_weights, diff_dict)
+            global_weights = self.easgd_add(global_weights, diff_dict)
+
+            local_worker.set_weights(local_weights, _get_global_vars())
+            self.global_worker.set_weights.remote(local_weights, _get_global_vars())
+            updated = True
+
+        return info, samples, training_steps
+
 
 def log_weights(items):
     actor, items = items
@@ -148,8 +175,9 @@ def log_weights(items):
     weights = ray.get(actor.get_weights.remote())
     print(weights["default_policy"]["default_policy/value_out/kernel"][0:10])
 
+def LocalTrainOneStepV0(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
+    workers.sync_weights()
 
-def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
     rollouts = from_actors(workers.remote_workers())
 
     def train_on_batch(samples):
@@ -177,18 +205,81 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
     return info
 
 
-def easgd_execution_plan(workers, config):
-    train_op = LocalTrainOneStep(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
+def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
+    workers.sync_weights()
+
+    rollouts = from_actors(workers.remote_workers())
+
+    def train_on_batch(samples):
+        if isinstance(samples, SampleBatch):
+            samples = MultiAgentBatch({DEFAULT_POLICY_ID: samples}, samples.count)
+
+        worker = get_global_worker()
+
+        if not hasattr(worker, 'num_iterations_trained'):
+            worker.num_iterations_trained = 0
+
+        if num_sgd_iter > 1:
+            info = do_minibatch_sgd(samples, {pid: worker.get_policy(pid) for pid in worker.policies_to_train}, worker, num_sgd_iter, sgd_minibatch_size, [])
+        else:
+            info = worker.learn_on_batch(samples)
+
+        worker.num_iterations_trained += 1
+        info['num_iterations_trained'] = worker.num_iterations_trained
+
+        return info, samples.count, num_sgd_iter
+
+    info = rollouts.for_each(train_on_batch)
+
+    return info
+
+
+def local_easgd_execution_plan(workers, config):
+    if "num_sgd_iter" in config:
+        train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
+    else:
+        train_op = LocalTrainOneStep(workers)
 
     if workers.remote_workers():
-        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, 1, config["num_workers"], 1))
+        train_op = train_op.for_each(LocalEASGDUpdate(workers.local_worker().remote(), .9, config["num_workers"], 20))
+
+    def report_metrics(item):
+        
+        info, samples, training_steps = item
+        
+        if True:
+            metrics = _get_shared_metrics()
+            metrics.counters[STEPS_TRAINED_COUNTER] += training_steps
+            metrics.counters[STEPS_SAMPLED_COUNTER] += samples
+
+        return info
+
+    train_op = train_op.gather_async().for_each(report_metrics)
 
     return StandardMetricsReporting(train_op, workers, config)
 
-CustomTrainer = PPOTrainer.with_updates(
-    execution_plan=easgd_execution_plan)
+def easgd_execution_plan(workers, config):
+    if "num_sgd_iter" in config:
+        train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
+    else:
+        train_op = LocalTrainOneStep(workers)
 
-trainer = CustomTrainer(config=config, env="CartPole-v0")
+    if workers.remote_workers():
+        train_op = train_op.gather_async().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 20))
+
+    return StandardMetricsReporting(train_op, workers, config)
+
+#CustomTrainer = PPOTrainer.with_updates(
+#    name="EASGD",
+#    execution_plan=easgd_execution_plan)
+
+CustomTrainer = a3c.A3CTrainer.with_updates(
+    name="EASGD-A3C",
+    execution_plan=local_easgd_execution_plan)
+
+# CustomTrainer = a3c.A3CTrainer.with_updates()
+
+trainer = CustomTrainer(config=config, env="QbertNoFrameskip-v4")
 
 # Can optionally call trainer.restore(path) to load a checkpoint.
 

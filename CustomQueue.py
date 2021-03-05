@@ -243,6 +243,7 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
 
     torch.manual_seed(10)
     np.random.seed(10)
+    random.seed(10)
 
     # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
@@ -264,7 +265,7 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
     # Set up experience buffer
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
     buf = PPOTrajectory(gamma, lam)
-    training_queue = TrainingQueue(256)
+    training_queue = TrainingQueue(200)
 
     # Set up optimizers for policy and value function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
@@ -274,7 +275,7 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
     start_time = time.time()
     o, ep_ret, ep_len = env.reset(), 0, 0
 
-    num_training = 7
+    num_training = 15
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
@@ -325,7 +326,7 @@ def ppo(env_fn, actor_critic=MLPActorCritic, ac_kwargs={}, seed=0,
 
             # Update obs (critical!)
             o = next_o
-            num_training = 7
+            num_training = 15
 
             timeout = ep_len == max_ep_len
             terminal = d or timeout
