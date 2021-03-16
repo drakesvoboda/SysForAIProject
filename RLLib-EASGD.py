@@ -1,6 +1,6 @@
 import os
 
-os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
+# os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
 
 
 import logging
@@ -58,13 +58,13 @@ from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, \
 
 from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
-ray.init()
+ray.init(address='10.10.1.1:6379')
 
 config = a3c.DEFAULT_CONFIG.copy()
 # config = ppo.DEFAULT_CONFIG.copy()
 
 config["num_gpus"] = 0
-config["num_workers"] = 5
+config["num_workers"] = 25
 config["sample_async"] = False
 config["num_envs_per_worker"] = 5
 # config["rollout_fragment_length"] = 100
@@ -136,39 +136,6 @@ class EASGDUpdateLearnerWeights:
 
         return info
 
-class LocalEASGDUpdate(EASGDUpdateLearnerWeights):
-    def __init__(self, global_worker, moving_rate, num_workers, broadcast_interval):
-        self.total_steps = 0
-        self.broadcast_interval = broadcast_interval
-        self.alpha = moving_rate / num_workers
-        self.global_worker = global_worker
-
-    def __call__(self, item):
-
-        info, samples, training_steps = item
-
-        updated = False
-
-        if info['num_iterations_trained'] % self.broadcast_interval == 0: 
-            local_worker = get_global_worker()
-
-            local_weights = local_worker.get_weights()
-            global_weights = ray.get(self.global_worker.get_weights.remote())
-
-            diff_dict = EASGDUpdateLearnerWeights.diff(local_weights, global_weights)
-
-            #print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
-            
-            local_weights = self.easgd_subtract(local_weights, diff_dict)
-            global_weights = self.easgd_add(global_weights, diff_dict)
-
-            local_worker.set_weights(local_weights, _get_global_vars())
-            self.global_worker.set_weights.remote(local_weights, _get_global_vars())
-            updated = True
-
-        return info, samples, training_steps
-
-
 def log_weights(items):
     actor, items = items
 
@@ -204,7 +171,6 @@ def LocalTrainOneStepV0(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch
 
     return info
 
-
 def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
     workers.sync_weights()
 
@@ -233,31 +199,6 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
 
     return info
 
-
-def local_easgd_execution_plan(workers, config):
-    if "num_sgd_iter" in config:
-        train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
-    else:
-        train_op = LocalTrainOneStep(workers)
-
-    if workers.remote_workers():
-        train_op = train_op.for_each(LocalEASGDUpdate(workers.local_worker().remote(), .9, config["num_workers"], 20))
-
-    def report_metrics(item):
-        
-        info, samples, training_steps = item
-        
-        if True:
-            metrics = _get_shared_metrics()
-            metrics.counters[STEPS_TRAINED_COUNTER] += training_steps
-            metrics.counters[STEPS_SAMPLED_COUNTER] += samples
-
-        return info
-
-    train_op = train_op.gather_async().for_each(report_metrics)
-
-    return StandardMetricsReporting(train_op, workers, config)
-
 def easgd_execution_plan(workers, config):
     if "num_sgd_iter" in config:
         train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
@@ -265,7 +206,7 @@ def easgd_execution_plan(workers, config):
         train_op = LocalTrainOneStep(workers)
 
     if workers.remote_workers():
-        train_op = train_op.gather_async().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 20))
+        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 20))
 
     return StandardMetricsReporting(train_op, workers, config)
 
@@ -275,7 +216,7 @@ def easgd_execution_plan(workers, config):
 
 CustomTrainer = a3c.A3CTrainer.with_updates(
     name="EASGD-A3C",
-    execution_plan=local_easgd_execution_plan)
+    execution_plan=easgd_execution_plan)
 
 # CustomTrainer = a3c.A3CTrainer.with_updates()
 
