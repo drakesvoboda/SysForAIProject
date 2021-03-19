@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"name": "ray",
+			"path": "../ray"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.pythonPath": "/home/drake/anaconda3/envs/spinningup/bin/python",
+		"files.watcherExclude": {
+			"**/bazel-*/**": true,
+			"**/ci/**": true,
+			"**/doc/**": true,
+			"**/docker/**": true,
+			"**/java/**": true,
+			"**/python/**": true,
+			"**/release/**": true,
+			"**/streaming/**": true,
+			"**/thirdparty/**": true
+		}
+	}
+}

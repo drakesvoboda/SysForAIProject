@@ -64,11 +64,12 @@ config = a3c.DEFAULT_CONFIG.copy()
 # config = ppo.DEFAULT_CONFIG.copy()
 
 config["num_gpus"] = 0
-config["num_workers"] = 15
+config["num_workers"] = 5
 config["sample_async"] = False
 config["num_envs_per_worker"] = 5
-# config["rollout_fragment_length"] = 100
+config["rollout_fragment_length"] = 20
 config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
+# config["placement_strategy"] = 'SPREAD'
 
 class EASGDUpdateLearnerWeights:
     def __init__(self, workers, moving_rate, num_workers, broadcast_interval):
@@ -112,8 +113,6 @@ class EASGDUpdateLearnerWeights:
         self.counters[actor] += 1
         metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
-        metrics.custom_metrics['worker_steps'] = self.counters
-
         if self.counters[actor] % self.broadcast_interval == 0:
             
             metrics.counters["num_weight_broadcasts"] += 1
@@ -139,41 +138,6 @@ class EASGDUpdateLearnerWeights:
                 # self.workers.local_worker().set_global_vars(_get_global_vars())
 
         return info
-
-def log_weights(items):
-    actor, items = items
-
-    weights = ray.get(actor.get_weights.remote())
-    print(weights["default_policy"]["default_policy/value_out/kernel"][0:10])
-
-def LocalTrainOneStepV0(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
-    workers.sync_weights()
-
-    rollouts = from_actors(workers.remote_workers())
-
-    def train_on_batch(samples):
-        if isinstance(samples, SampleBatch):
-            samples = MultiAgentBatch({DEFAULT_POLICY_ID: samples}, samples.count)
-
-        worker = get_global_worker()
-
-        def train_policy(policy, policy_id):
-            batch = samples.policy_batches[policy_id]
-
-            for i in range(num_sgd_iter):
-                for minibatch in minibatches(batch, sgd_minibatch_size):
-                    batch_fetches = (worker.learn_on_batch(
-                        MultiAgentBatch({
-                            policy_id: minibatch
-                        }, minibatch.count)))[policy_id]
-        
-        worker.foreach_trainable_policy(train_policy)
-
-        return {}
-
-    info = rollouts.for_each(train_on_batch)
-
-    return info
 
 def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
     workers.sync_weights()
@@ -210,7 +174,7 @@ def easgd_execution_plan(workers, config):
         train_op = LocalTrainOneStep(workers)
 
     if workers.remote_workers():
-        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 5))
+        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 3))
 
     return StandardMetricsReporting(train_op, workers, config)
 

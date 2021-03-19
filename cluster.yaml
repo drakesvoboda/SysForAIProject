@@ -36,7 +36,7 @@ docker:
 # Local specific configuration.
 provider:
     type: local
-    head_ip: 128.110.153.66
+    head_ip: 128.110.155.78
     worker_ips: [10.10.1.2, 10.10.1.3]
     use_internal_ips: True
     # Optional when running automatic cluster management on prem. If you use a coordinator server,
