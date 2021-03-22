@@ -1,6 +1,6 @@
 import os
 
-# os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
+os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
 
 
 import logging
@@ -10,7 +10,6 @@ import collections
 import copy
 
 from collections import defaultdict
-
 
 from ray.util.iter import from_actors, LocalIterator
 from ray.util.iter_metrics import SharedMetrics
@@ -58,13 +57,13 @@ from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, \
 
 from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
-ray.init(address='10.10.1.1:6379')
+ray.init()
 
 config = a3c.DEFAULT_CONFIG.copy()
 # config = ppo.DEFAULT_CONFIG.copy()
 
 config["num_gpus"] = 0
-config["num_workers"] = 15
+config["num_workers"] = 5
 config["sample_async"] = False
 config["num_envs_per_worker"] = 5
 # config["rollout_fragment_length"] = 100
@@ -110,9 +109,8 @@ class EASGDUpdateLearnerWeights:
         metrics.counters[STEPS_SAMPLED_COUNTER] += samples
 
         self.counters[actor] += 1
-        metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
-        metrics.custom_metrics['worker_steps'] = self.counters
+        metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
         if self.counters[actor] % self.broadcast_interval == 0:
             
@@ -124,8 +122,8 @@ class EASGDUpdateLearnerWeights:
 
                 diff_dict = EASGDUpdateLearnerWeights.diff(local_weights, self.global_weights)
                 
-                # print(actor)
-                # print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
+                #print(actor)
+                #print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
                 #print(local_weights["default_policy"]["default_policy/value_out/kernel"][:10])
                 #print(self.global_weights["default_policy"]["default_policy/value_out/kernel"][:10])
 
@@ -136,7 +134,7 @@ class EASGDUpdateLearnerWeights:
                 actor.set_weights.remote(local_weights, _get_global_vars())
 
                 # Also update global vars of the local worker.
-                # self.workers.local_worker().set_global_vars(_get_global_vars())
+                #self.workers.local_worker().set_global_vars(_get_global_vars())
 
         return info
 
@@ -210,7 +208,7 @@ def easgd_execution_plan(workers, config):
         train_op = LocalTrainOneStep(workers)
 
     if workers.remote_workers():
-        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 5))
+        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 20))
 
     return StandardMetricsReporting(train_op, workers, config)
 
@@ -222,7 +220,7 @@ CustomTrainer = a3c.A3CTrainer.with_updates(
     name="EASGD-A3C",
     execution_plan=easgd_execution_plan)
 
-# CustomTrainer = a3c.A3CTrainer.with_updates()
+#CustomTrainer = a3c.A3CTrainer.with_updates()
 
 trainer = CustomTrainer(config=config, env="QbertNoFrameskip-v4")
 
