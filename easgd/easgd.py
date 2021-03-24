@@ -1,7 +1,6 @@
 import os
 
-# os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
-
+os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
 
 import logging
 from typing import List, Tuple
@@ -10,7 +9,6 @@ import collections
 import copy
 
 from collections import defaultdict
-
 
 from ray.util.iter import from_actors, LocalIterator
 from ray.util.iter_metrics import SharedMetrics
@@ -58,16 +56,46 @@ from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, \
 
 from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
-ray.init(address='10.10.1.1:6379')
+from easgd_tf_policy import EASGDTFPolicy, EASGDUpdate
 
-config = a3c.DEFAULT_CONFIG.copy()
-# config = ppo.DEFAULT_CONFIG.copy()
+ray.init()
+
+DEFAULT_CONFIG = with_common_config({
+    # Should use a critic as a baseline (otherwise don't use value baseline;
+    # required for using GAE).
+    "use_critic": True,
+    # If true, use the Generalized Advantage Estimator (GAE)
+    # with a value function, see https://arxiv.org/pdf/1506.02438.pdf.
+    "use_gae": True,
+    # Size of rollout batch
+    "rollout_fragment_length": 10,
+    # GAE(gamma) parameter
+    "lambda": 1.0,
+    # Max global norm for each gradient calculated by worker
+    "grad_clip": 40.0,
+    # Learning rate
+    "lr": 0.0001,
+    # Learning rate schedule
+    "lr_schedule": None,
+    # Value Function Loss coefficient
+    "vf_loss_coeff": 0.5,
+    # Entropy coefficient
+    "entropy_coeff": 0.01,
+    # Min time per iteration
+    "min_iter_time_s": 5,
+    # Workers sample async. Note that this increases the effective
+    # rollout_fragment_length by up to 5x due to async buffering of batches.
+    "sample_async": True,
+
+    #"moving_rate": .9,
+    #"update_frequency": 10
+})
+
+config = DEFAULT_CONFIG.copy()
 
 config["num_gpus"] = 0
 config["num_workers"] = 5
-config["sample_async"] = False
 config["num_envs_per_worker"] = 5
-# config["rollout_fragment_length"] = 100
 config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
 
 class EASGDUpdateLearnerWeights:
@@ -75,31 +103,14 @@ class EASGDUpdateLearnerWeights:
         self.total_steps = 0
         self.broadcast_interval = broadcast_interval
         self.workers = workers
+
         self.global_weights = copy.deepcopy(workers.local_worker().get_weights())
+
         self.counters = [i for i in range(num_workers)]
         self.alpha = moving_rate / num_workers
 
         self.counters = {actor: 0 for actor in self.workers.remote_workers()}
         self.worker_idx = {actor: idx for idx, actor in enumerate(self.workers.remote_workers())}
-
-    @staticmethod
-    def diff(local_param, global_param):
-        if isinstance(global_param, collections.MutableMapping):
-            return { key: EASGDUpdateLearnerWeights.diff(local, glob) for (key, local), (_, glob) in zip(local_param.items(), global_param.items()) }
-        else:
-            return local_param - global_param
-
-    def easgd_add(self, params, diffs):
-        if isinstance(params, collections.MutableMapping):
-            return { key: self.easgd_add(param, diff) for (key, param), (_, diff) in zip(params.items(), diffs.items()) }
-        else:
-            return params + self.alpha * diffs
-
-    def easgd_subtract(self, params, diffs):
-        if isinstance(params, collections.MutableMapping):
-            return { key: self.easgd_subtract(param, diff) for (key, param), (_, diff) in zip(params.items(), diffs.items()) }
-        else:
-            return params - self.alpha * diffs
 
     def __call__(self, item):
         actor, (info, samples, training_steps) = item
@@ -113,70 +124,32 @@ class EASGDUpdateLearnerWeights:
 
         metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
-        if self.counters[actor] % self.broadcast_interval == 0:
-            
+        global_vars = _get_global_vars()
+        self.workers.local_worker().set_global_vars(global_vars)
+        actor.set_global_vars.remote(global_vars)
+
+        if False and self.counters[actor] % self.broadcast_interval == 0:    
+            metrics.counters["num_weight_broadcasts"] += 1
+            with metrics.timers[WORKER_UPDATE_TIMER]:
+                local_weights = ray.get(actor.get_weights.remote())
+                diff_dict = EASGDUpdate.diff(local_weights, self.global_weights)
+                self.global_weights = EASGDUpdate.easgd_add(self.global_weights, diff_dict, self.alpha)
+                local_weights = EASGDUpdate.easgd_subtract(local_weights, diff_dict, self.alpha)
+                actor.set_weights.remote(local_weights)
+
+        if self.counters[actor] % self.broadcast_interval == 0:       
             metrics.counters["num_weight_broadcasts"] += 1
 
             with metrics.timers[WORKER_UPDATE_TIMER]:
-
-                local_weights = ray.get(actor.get_weights.remote())
-
-                diff_dict = EASGDUpdateLearnerWeights.diff(local_weights, self.global_weights)
-                
-                #print(actor)
-                #print(diff_dict["default_policy"]["default_policy/value_out/kernel"][:10])
-                #print(local_weights["default_policy"]["default_policy/value_out/kernel"][:10])
-                #print(self.global_weights["default_policy"]["default_policy/value_out/kernel"][:10])
-
-                self.global_weights = self.easgd_add(self.global_weights, diff_dict)
-                local_weights = self.easgd_subtract(local_weights, diff_dict)
-                    
-                # Update metrics.    
-                actor.set_weights.remote(local_weights, _get_global_vars())
-
-                # Also update global vars of the local worker.
-                #self.workers.local_worker().set_global_vars(_get_global_vars())
+                for pid, gw in self.global_weights.items():
+                    def update_worker(w, alpha):
+                        return w.policy_map[pid].easgd_update(gw, alpha)
+                    diff = ray.get(actor.apply.remote(update_worker, self.alpha))
+                    self.global_weights[pid] = EASGDUpdate.easgd_add(gw, diff, self.alpha)
 
         return info
 
-def log_weights(items):
-    actor, items = items
-
-    weights = ray.get(actor.get_weights.remote())
-    print(weights["default_policy"]["default_policy/value_out/kernel"][0:10])
-
-def LocalTrainOneStepV0(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
-    workers.sync_weights()
-
-    rollouts = from_actors(workers.remote_workers())
-
-    def train_on_batch(samples):
-        if isinstance(samples, SampleBatch):
-            samples = MultiAgentBatch({DEFAULT_POLICY_ID: samples}, samples.count)
-
-        worker = get_global_worker()
-
-        def train_policy(policy, policy_id):
-            batch = samples.policy_batches[policy_id]
-
-            for i in range(num_sgd_iter):
-                for minibatch in minibatches(batch, sgd_minibatch_size):
-                    batch_fetches = (worker.learn_on_batch(
-                        MultiAgentBatch({
-                            policy_id: minibatch
-                        }, minibatch.count)))[policy_id]
-        
-        worker.foreach_trainable_policy(train_policy)
-
-        return {}
-
-    info = rollouts.for_each(train_on_batch)
-
-    return info
-
 def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
-    workers.sync_weights()
-
     rollouts = from_actors(workers.remote_workers())
 
     def train_on_batch(samples):
@@ -202,30 +175,50 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
 
     return info
 
+def log_weights(items):
+    actor, items = items
+
+    weights = ray.get(actor.get_weights.remote())
+    print(weights["default_policy"]["default_policy/value_out/kernel"][0:10])
+
+    return actor, items
+
 def easgd_execution_plan(workers, config):
+    workers.sync_weights()
+
     if "num_sgd_iter" in config:
-        train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
+        train_op = LocalTrainOneStep(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
     else:
         train_op = LocalTrainOneStep(workers)
 
     if workers.remote_workers():
-        train_op = train_op.gather_async().zip_with_source_actor().for_each(EASGDUpdateLearnerWeights(workers, .9, config["num_workers"], 20))
+        train_op = train_op.gather_async().zip_with_source_actor() \
+            .for_each(EASGDUpdateLearnerWeights(workers, 0.9, config["num_workers"], 20))
 
     return StandardMetricsReporting(train_op, workers, config)
 
-#CustomTrainer = PPOTrainer.with_updates(
-#    name="EASGD",
-#    execution_plan=easgd_execution_plan)
+def get_policy_class(config):
+    return EASGDTFPolicy
+
+def validate_config(config):
+    if config["entropy_coeff"] < 0:
+        raise ValueError("`entropy_coeff` must be >= 0.0!")
+    if config["num_workers"] <= 0 and config["sample_async"]:
+        raise ValueError("`num_workers` for A3C must be >= 1!")
+
+EASGDTrainer = a3c.A3CTrainer.with_updates(
+    name="EASGD",
+    default_policy=EASGDTFPolicy,
+    get_policy_class=get_policy_class,
+    execution_plan=easgd_execution_plan)
+
+trainer = EASGDTrainer(config=config, env="QbertNoFrameskip-v4")
 
 CustomTrainer = a3c.A3CTrainer.with_updates(
     name="EASGD-A3C",
     execution_plan=easgd_execution_plan)
 
-#CustomTrainer = a3c.A3CTrainer.with_updates()
-
-trainer = CustomTrainer(config=config, env="QbertNoFrameskip-v4")
-
-# Can optionally call trainer.restore(path) to load a checkpoint.
+#trainer = CustomTrainer(config=config, env="QbertNoFrameskip-v4")
 
 for i in range(1000):
    # Perform one iteration of training the policy with PPO

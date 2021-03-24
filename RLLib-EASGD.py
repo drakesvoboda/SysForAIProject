@@ -66,7 +66,7 @@ config["num_gpus"] = 0
 config["num_workers"] = 5
 config["sample_async"] = False
 config["num_envs_per_worker"] = 5
-# config["rollout_fragment_length"] = 100
+config["rollout_fragment_length"] = 20
 config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
 
 class EASGDUpdateLearnerWeights:
@@ -202,6 +202,9 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
     return info
 
 def easgd_execution_plan(workers, config):
+    for key, val in config.items():
+        print(key, val)
+
     if "num_sgd_iter" in config:
         train_op = LocalTrainOneStepV0(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
     else:

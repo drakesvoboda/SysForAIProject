@@ -1,6 +1,19 @@
 # Launch the cluster
 ray up -y cluster.yaml
 
+# Install docker on worker node
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+sudo usermod -aG docker drakes
+sudo systemctl restart docker -f
+
+# Startup docker container on worker node
+sudo docker run -i -t --network host rayproject/ray-ml:2.0.0-cpu /bin/bash
+
+# Connect to the cluster on worker node
+ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.2'
+ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.3'
+
 # Stop the cluster 
 ray down -y cluster.yaml
 
@@ -13,15 +26,3 @@ ray dashboard cluster.yaml
 # Run tensorboard from the cluster
 ray exec cluster.yaml --port-forward=8008 'tensorboard --logdir ~/ray_results --port=8008'
 
-# Install docker on worker node
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-sudo usermod -aG docker drakes
-sudo systemctl restart docker -f
-
-# Startup docker container on worker node
-sudo docker run -i -t --network host rayproject/ray-ml:latest-cpu /bin/bash
-
-# Connect to the cluster on worker node
-ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.2'
-ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.3'
