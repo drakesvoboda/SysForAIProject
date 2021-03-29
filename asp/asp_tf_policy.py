@@ -43,8 +43,7 @@ class ASPUpdate:
         else:
             return params + diffs*scale_factor
 
-    @staticmethod
-    def significance_filter(params, diffs, threshold):
+    def significance_filter(params, diffs, threshold, num_significant=0):
         def is_significant(param, diff):
             if isinstance(diff, collections.MutableMapping): return True
 
@@ -53,10 +52,23 @@ class ASPUpdate:
 
             return np.linalg.norm(diff)/norm_params > threshold
 
+
+
         if isinstance(params, collections.MutableMapping):
-            return { key: ASPUpdate.significance_filter(param, diff, threshold) for (key, param), (_, diff) in zip(params.items(), diffs.items()) if is_significant(param, diff) }
+            ret = {}
+
+            for (key, param), (_, diff) in zip(params.items(), diffs.items()):
+                if is_significant(param, diff):
+                    children, num_children = ASPUpdate.significance_filter(param, diff, threshold)
+                    
+                    if len(children) > 0:
+                        ret[key] = children
+
+                    num_significant += num_children
+            
+            return ret, num_significant
         else:
-            return diffs
+            return diffs, 1
             
 class ASPUpdateMixin:
     def __init__(self): 
@@ -73,9 +85,9 @@ class ASPUpdateMixin:
         def get_updates(significance_threshold):
             local_weights = self.get_weights()
             update = ASPUpdate.diff(local_weights, self.global_weights)
-            update = ASPUpdate.significance_filter(local_weights, update, significance_threshold)
+            update, num_significant = ASPUpdate.significance_filter(local_weights, update, significance_threshold)
             self.global_weights = ASPUpdate.add(self.global_weights, update)
-            return update
+            return update, num_significant
 
         self.asp_sync_global_model = sync_global_model
         self.asp_sync_updates = do_update

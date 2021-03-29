@@ -95,7 +95,7 @@ DEFAULT_CONFIG = with_common_config({
     # rollout_fragment_length by up to 5x due to async buffering of batches.
     "sample_async": True,
 
-    "significance_threshold": 0
+    "significance_threshold": 0.01
 })
 
 class ASPUpdateLearnerWeights:
@@ -133,15 +133,22 @@ class ASPUpdateLearnerWeights:
                     return w.policy_map[pid].asp_get_updates(significance_threshold)
 
                 def sync_update(w, update):
+                    update, _ = update
                     return w.policy_map[pid].asp_sync_updates(update)
                 
                 update = actor.apply.remote(get_update, self.significance_threshold)
 
-                if lw != actor: sync_update(lw, ray.get(update))
-
                 if self.workers.remote_workers():
                     for e in self.workers.remote_workers():
                         if e != actor: e.apply.remote(sync_update, update)
+
+                update = ray.get(update)
+
+                if lw != actor: sync_update(lw, update)
+
+                _, num_significant = update
+
+                metrics.counters["significant_weight_updates"] += num_significant
 
         return info
 
@@ -176,7 +183,6 @@ def asp_execution_plan(workers, config):
 
     workers.foreach_trainable_policy(lambda p, pid: p.asp_sync_global_model())
 
-
     if "num_sgd_iter" in config:
         train_op = LocalTrainOneStep(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
     else:
@@ -198,7 +204,7 @@ def validate_config(config):
         raise ValueError("`num_workers` for A3C must be >= 1!")
 
 ASPTrainer = a3c.A3CTrainer.with_updates(
-    name="EASGD",
+    name="ASP",
     default_policy=ASPTFPolicy,
     default_config=DEFAULT_CONFIG,
     get_policy_class=get_policy_class,

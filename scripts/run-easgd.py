@@ -17,7 +17,7 @@ config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
 config["moving_rate"] = .9
 config["update_frequency"] = 20
 
-trainer = easgd.EASGDTrainer(config=config, env="QbertNoFrameskip-v4")
+trainer = easgd.EASGDTrainer(config=config, env="CartPole-v4")
 
 for i in range(1000):
    result = trainer.train()
