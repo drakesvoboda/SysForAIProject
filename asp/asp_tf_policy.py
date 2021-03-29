@@ -35,13 +35,13 @@ class ASPUpdate:
             return params - diffs
 
     @staticmethod
-    def add(params, diffs=None):
+    def add(params, diffs=None, scale_factor=1):
         if diffs is None or len(diffs) == 0: 
             return params
         elif isinstance(params, collections.MutableMapping):
-            return { key: ASPUpdate.add(param, diffs[key] if key in diffs else None) for key, param in params.items() }
+            return { key: ASPUpdate.add(param, diffs[key] if key in diffs else None, scale_factor) for key, param in params.items() }
         else:
-            return params + diffs
+            return params + diffs*scale_factor
 
     @staticmethod
     def significance_filter(params, diffs, threshold):
@@ -61,13 +61,14 @@ class ASPUpdate:
 class ASPUpdateMixin:
     def __init__(self): 
         def sync_global_model():
+            # I'm using the global weights parameter to indirectly compute the accumulated updates. It might be better to do that more directly.
             self.global_weights = self.get_weights()
 
         def do_update(update):
             lw = self.get_weights()
             lw = ASPUpdate.add(lw, update)
-            self.global_weights = ASPUpdate.add(self.global_weights, update)
             self.set_weights(lw)
+            self.global_weights = ASPUpdate.add(self.global_weights, update)
 
         def get_updates(significance_threshold):
             local_weights = self.get_weights()
