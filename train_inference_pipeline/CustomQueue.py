@@ -18,7 +18,7 @@ from gym.spaces import Box, Discrete
 import spinup.algos.pytorch.ppo.core as core
 import queue
 
-from ActorCritic import MLPActorCritic
+from .ActorCritic import MLPActorCritic
 
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads

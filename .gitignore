@@ -186,3 +186,5 @@ tools/prometheus*
 # ray project files
 project-id
 .mypy_cache/
+
+cluster.yaml

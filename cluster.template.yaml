@@ -25,7 +25,7 @@ idle_timeout_minutes: 5
 # and opens all the necessary ports to support the Ray cluster.
 # Empty string means disabled. Assumes Docker is installed.
 docker:
-    image: "rayproject/ray-ml:latest-cpu" # You can change this to latest-cpu if you don't need GPU support and want a faster startup
+    image: "rayproject/ray-ml:nightly-cpu" # You can change this to latest-cpu if you don't need GPU support and want a faster startup
     # image: rayproject/ray:latest-gpu   # use this one if you don't need ML dependencies, it's faster to pull
     container_name: "ray_container"
     # If true, pulls latest version of image. Otherwise, `docker run` will only pull the image
@@ -106,6 +106,14 @@ head_setup_commands: []
 
 # Custom commands that will be run on worker nodes after common setup.
 worker_setup_commands: []
+
+file_mounts: {
+    "/tmp/current_branch_sha": "./.git/refs/heads/main",
+}
+
+setup_commands:
+    - test -e SysForAIProject || git clone https://github.com/drakesvoboda/SysForAIProject
+    - cd SysForAIProject && git fetch && git checkout `cat /tmp/current_branch_sha` && pip install -e .
 
 # Command to start ray on the head node. You don't need to change this.
 head_start_ray_commands:

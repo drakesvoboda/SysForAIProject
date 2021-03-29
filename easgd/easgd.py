@@ -1,7 +1,5 @@
 import os
 
-os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
-
 import logging
 from typing import List, Tuple
 import time
@@ -50,15 +48,25 @@ from ray.rllib.execution.rollout_ops import AsyncGradients
 from ray.rllib.execution.train_ops import ApplyGradients
 from ray.rllib.execution.metric_ops import StandardMetricsReporting
 
+import ray
+from ray.rllib.agents.a3c.a3c_tf_policy import A3CTFPolicy
+from ray.rllib.agents.ppo.ppo_tf_policy import ValueNetworkMixin
+from ray.rllib.policy.sample_batch import SampleBatch
+from ray.rllib.evaluation.postprocessing import compute_gae_for_sample_batch, \
+    Postprocessing
+from ray.rllib.policy.tf_policy_template import build_tf_policy
+from ray.rllib.policy.tf_policy import LearningRateSchedule
+from ray.rllib.utils.deprecation import deprecation_warning
+from ray.rllib.utils.framework import try_import_tf
+from ray.rllib.utils.tf_ops import explained_variance
+
 from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, \
     SAMPLE_TIMER, GRAD_WAIT_TIMER, _check_sample_batch_type, \
     _get_shared_metrics, _get_global_vars
 
 from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
-from easgd_tf_policy import EASGDTFPolicy, EASGDUpdate
-
-ray.init()
+from easgd.easgd_tf_policy import EASGDTFPolicy, EASGDUpdate
 
 DEFAULT_CONFIG = with_common_config({
     # Should use a critic as a baseline (otherwise don't use value baseline;
@@ -87,16 +95,9 @@ DEFAULT_CONFIG = with_common_config({
     # rollout_fragment_length by up to 5x due to async buffering of batches.
     "sample_async": True,
 
-    #"moving_rate": .9,
-    #"update_frequency": 10
+    "moving_rate": .9,
+    "update_frequency": 20
 })
-
-config = DEFAULT_CONFIG.copy()
-
-config["num_gpus"] = 0
-config["num_workers"] = 5
-config["num_envs_per_worker"] = 5
-config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
 
 class EASGDUpdateLearnerWeights:
     def __init__(self, workers, moving_rate, num_workers, broadcast_interval):
@@ -193,7 +194,7 @@ def easgd_execution_plan(workers, config):
 
     if workers.remote_workers():
         train_op = train_op.gather_async().zip_with_source_actor() \
-            .for_each(EASGDUpdateLearnerWeights(workers, 0.9, config["num_workers"], 20))
+            .for_each(EASGDUpdateLearnerWeights(workers, config['moving_rate'], config["num_workers"], config['update_frequency']))
 
     return StandardMetricsReporting(train_op, workers, config)
 
@@ -209,19 +210,6 @@ def validate_config(config):
 EASGDTrainer = a3c.A3CTrainer.with_updates(
     name="EASGD",
     default_policy=EASGDTFPolicy,
+    default_config=DEFAULT_CONFIG,
     get_policy_class=get_policy_class,
     execution_plan=easgd_execution_plan)
-
-trainer = EASGDTrainer(config=config, env="QbertNoFrameskip-v4")
-
-CustomTrainer = a3c.A3CTrainer.with_updates(
-    name="EASGD-A3C",
-    execution_plan=easgd_execution_plan)
-
-#trainer = CustomTrainer(config=config, env="QbertNoFrameskip-v4")
-
-for i in range(1000):
-   # Perform one iteration of training the policy with PPO
-   result = trainer.train()
-   # print("==========")
-   print(pretty_print(result))

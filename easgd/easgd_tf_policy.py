@@ -54,8 +54,14 @@ def setup_mixins(policy, obs_space, action_space, config):
     LearningRateSchedule.__init__(policy, config["lr"], config["lr_schedule"])
     EASGDUpdateMixin.__init__(policy)
 
+
+def get_default_config():
+    from easgd import DEFAULT_CONFIG
+    return DEFAULT_CONFIG
+
 EASGDTFPolicy = A3CTFPolicy.with_updates(
     name="EASGDTFPolicy",
+    get_default_config=get_default_config,
     mixins=[ValueNetworkMixin, LearningRateSchedule, EASGDUpdateMixin], 
     before_loss_init=setup_mixins,
 )
