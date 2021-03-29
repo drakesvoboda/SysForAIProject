@@ -66,7 +66,7 @@ from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, \
 
 from ray.rllib.utils.typing import PolicyID, SampleBatchType, ModelGradients
 
-from easgd.easgd_tf_policy import EASGDTFPolicy, EASGDUpdate
+from asp.asp_tf_policy import ASPTFPolicy
 
 DEFAULT_CONFIG = with_common_config({
     # Should use a critic as a baseline (otherwise don't use value baseline;
@@ -95,26 +95,24 @@ DEFAULT_CONFIG = with_common_config({
     # rollout_fragment_length by up to 5x due to async buffering of batches.
     "sample_async": True,
 
-    "moving_rate": .9,
-    "update_frequency": 20
+    "significance_threshold": .01
 })
 
-class EASGDUpdateLearnerWeights:
-    def __init__(self, workers, moving_rate, num_workers, broadcast_interval):
+class ASPUpdateLearnerWeights:
+    def __init__(self, workers, num_workers, significance_threshold):
         self.total_steps = 0
-        self.broadcast_interval = broadcast_interval
         self.workers = workers
 
-        self.global_weights = copy.deepcopy(workers.local_worker().get_weights())
-
         self.counters = [i for i in range(num_workers)]
-        self.alpha = moving_rate / num_workers
+        self.significance_threshold = significance_threshold
 
         self.counters = {actor: 0 for actor in self.workers.remote_workers()}
         self.worker_idx = {actor: idx for idx, actor in enumerate(self.workers.remote_workers())}
 
     def __call__(self, item):
         actor, (info, samples, training_steps) = item
+
+        lw = self.workers.local_worker()
 
         metrics = _get_shared_metrics()
 
@@ -126,18 +124,24 @@ class EASGDUpdateLearnerWeights:
         metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
         global_vars = _get_global_vars()
-        self.workers.local_worker().set_global_vars(global_vars)
+        lw.set_global_vars(global_vars)
         actor.set_global_vars.remote(global_vars)
 
-        if self.counters[actor] % self.broadcast_interval == 0:       
-            metrics.counters["num_weight_broadcasts"] += 1
+        with metrics.timers[WORKER_UPDATE_TIMER]:
+            for pid, p in lw.policy_map.items():
+                def get_update(w, significance_threshold):
+                    return w.policy_map[pid].asp_get_updates(significance_threshold)
 
-            with metrics.timers[WORKER_UPDATE_TIMER]:
-                for pid, gw in self.global_weights.items():
-                    def update_worker(w, alpha):
-                        return w.policy_map[pid].easgd_update(gw, alpha)
-                    diff = ray.get(actor.apply.remote(update_worker, self.alpha))
-                    self.global_weights[pid] = EASGDUpdate.easgd_add(gw, diff, self.alpha)
+                def sync_update(w, update):
+                    return w.policy_map[pid].asp_sync_updates(update)
+                
+                update = actor.apply.remote(get_update, self.significance_threshold)
+
+                if lw != actor: sync_update(lw, ray.get(update))
+
+                if self.workers.remote_workers():
+                    for e in self.workers.remote_workers():
+                        if e != actor: e.apply.remote(sync_update, update)
 
         return info
 
@@ -167,8 +171,11 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
 
     return info
 
-def easgd_execution_plan(workers, config):
+def asp_execution_plan(workers, config):
     workers.sync_weights()
+
+    workers.foreach_trainable_policy(lambda p, pid: p.asp_sync_global_model())
+
 
     if "num_sgd_iter" in config:
         train_op = LocalTrainOneStep(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
@@ -177,12 +184,12 @@ def easgd_execution_plan(workers, config):
 
     if workers.remote_workers():
         train_op = train_op.gather_async().zip_with_source_actor() \
-            .for_each(EASGDUpdateLearnerWeights(workers, config['moving_rate'], config["num_workers"], config['update_frequency']))
+            .for_each(ASPUpdateLearnerWeights(workers, config['num_workers'], config['significance_threshold']))
 
     return StandardMetricsReporting(train_op, workers, config)
 
 def get_policy_class(config):
-    return EASGDTFPolicy
+    return ASPTFPolicy
 
 def validate_config(config):
     if config["entropy_coeff"] < 0:
@@ -190,9 +197,9 @@ def validate_config(config):
     if config["num_workers"] <= 0 and config["sample_async"]:
         raise ValueError("`num_workers` for A3C must be >= 1!")
 
-EASGDTrainer = a3c.A3CTrainer.with_updates(
+ASPTrainer = a3c.A3CTrainer.with_updates(
     name="EASGD",
-    default_policy=EASGDTFPolicy,
+    default_policy=ASPTFPolicy,
     default_config=DEFAULT_CONFIG,
     get_policy_class=get_policy_class,
-    execution_plan=easgd_execution_plan)
+    execution_plan=asp_execution_plan)
