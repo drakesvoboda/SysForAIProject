@@ -52,8 +52,6 @@ class ASPUpdate:
 
             return np.linalg.norm(diff)/norm_params > threshold
 
-
-
         if isinstance(params, collections.MutableMapping):
             ret = {}
 

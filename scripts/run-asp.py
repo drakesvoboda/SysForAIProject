@@ -14,9 +14,9 @@ config["num_gpus"] = 0
 config["num_workers"] = 5
 config["num_envs_per_worker"] = 5
 config["lr_schedule"] = [[0, 0.0007],[20000000, 0.000000000001],]
-config["significance_threshold"] = .01
+config["significance_threshold"] = 0
 
-trainer = asp.ASPTrainer(config=config, env="CartPole-v0")
+trainer = asp.ASPTrainer(config=config, env="QbertNoFrameskip-v4")
 
 for i in range(1000):
    result = trainer.train()

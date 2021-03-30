@@ -94,7 +94,7 @@ DEFAULT_CONFIG = with_common_config({
     # Workers sample async. Note that this increases the effective
     # rollout_fragment_length by up to 5x due to async buffering of batches.
     "sample_async": True,
-
+    
     "significance_threshold": 0.01
 })
 
