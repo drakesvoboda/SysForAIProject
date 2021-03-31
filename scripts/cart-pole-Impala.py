@@ -1,6 +1,6 @@
 import os
 
-os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
+# os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
 
 import ray
 import ray.rllib.agents.impala as impala
@@ -12,7 +12,7 @@ config = impala.DEFAULT_CONFIG.copy()
 config["num_gpus"] = 0
 config["num_workers"] = 5
 config["num_envs_per_worker"] = 5
-trainer = impala.ImpalaTrainer(config=config, env="QbertNoFrameskip-v4")
+trainer = impala.ImpalaTrainer(config=config, env="LunarLander-v2")
 
 # Can optionally call trainer.restore(path) to load a checkpoint.
 

@@ -30,7 +30,7 @@ docker:
     container_name: "ray_container"
     # If true, pulls latest version of image. Otherwise, `docker run` will only pull the image
     # if no cached version is present.
-    pull_before_run: True
+    pull_before_run: False
     run_options: []  # Extra options to pass into "docker run"
 
 # Local specific configuration.

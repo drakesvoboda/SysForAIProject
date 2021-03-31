@@ -72,23 +72,30 @@ class ASPUpdateMixin:
     def __init__(self): 
         def sync_global_model():
             # I'm using the global weights parameter to indirectly compute the accumulated updates. It might be better to do that more directly.
-            self.global_weights = self.get_weights()
+            self.old_weights = self.get_weights()
+            self.accumulated_update = ASPUpdate.subtract(self.old_weights, self.old_weights)
+
+        def accumulate_grads():
+            lw = self.get_weights()
+            grads = ASPUpdate.subtract(lw, self.old_weights)
+            self.old_weights = lw
+            self.accumulated_update = ASPUpdate.add(self.accumulated_update, grads)
 
         def do_update(update):
             lw = self.get_weights()
             lw = ASPUpdate.add(lw, update)
-            self.set_weights(lw)
-            self.global_weights = ASPUpdate.add(self.global_weights, update)
+            self.old_weights = ASPUpdate.add(self.old_weights, update)
+            self.set_weights(lw)    
 
         def get_updates(significance_threshold):
             local_weights = self.get_weights()
-            update = ASPUpdate.diff(local_weights, self.global_weights)
-            update, num_significant = ASPUpdate.significance_filter(local_weights, update, significance_threshold)
-            self.global_weights = ASPUpdate.add(self.global_weights, update)
-            return update, num_significant
+            significant_update, num_significant = ASPUpdate.significance_filter(local_weights, self.accumulated_update, significance_threshold)
+            self.accumulated_update = ASPUpdate.subtract(self.accumulated_update, significant_update) # Reset accumulated update to zero for significant updates we send
+            return significant_update, num_significant
 
         self.asp_sync_global_model = sync_global_model
         self.asp_sync_updates = do_update
+        self.asp_accumulate_grads = accumulate_grads
         self.asp_get_updates = get_updates  
 
 def setup_mixins(policy, obs_space, action_space, config):

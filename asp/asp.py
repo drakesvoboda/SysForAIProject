@@ -1,17 +1,24 @@
 import os
 
+import queue
 import logging
 from typing import List, Tuple
 import time
 import collections
 import copy
+from warnings import resetwarnings
+
+from ray.rllib.utils.timer import TimerStat
+from ray.rllib.utils.window_stat import WindowStat
+
+import threading
 
 from collections import defaultdict
 
 from ray.util.iter import from_actors, LocalIterator
 from ray.util.iter_metrics import SharedMetrics
 from ray.rllib.evaluation.metrics import get_learner_stats
-from ray.rllib.evaluation.rollout_worker import get_global_worker
+from ray.rllib.evaluation.rollout_worker import RolloutWorker, get_global_worker
 from ray.rllib.evaluation.worker_set import WorkerSet
 from ray.rllib.execution.common import STEPS_SAMPLED_COUNTER, LEARNER_INFO, STEPS_TRAINED_COUNTER, \
     SAMPLE_TIMER, GRAD_WAIT_TIMER, _check_sample_batch_type, WORKER_UPDATE_TIMER, \
@@ -93,10 +100,88 @@ DEFAULT_CONFIG = with_common_config({
     "min_iter_time_s": 5,
     # Workers sample async. Note that this increases the effective
     # rollout_fragment_length by up to 5x due to async buffering of batches.
-    "sample_async": True,
+    "sample_async": False,
     
     "significance_threshold": 0.01
 })
+
+class ParameterServerThread(threading.Thread):
+    """Background thread that updates the local model from sample trajectories.
+
+    The learner thread communicates with the main thread through Queues. This
+    is needed since Ray operations can only be run on the main thread. In
+    addition, moving heavyweight gradient ops session runs off the main thread
+    improves overall throughput.
+    """
+
+    def __init__(self, workers: WorkerSet, learner_queue_timeout: int):
+        """Initialize the learner thread.
+
+        Args:
+            local_worker (RolloutWorker): process local rollout worker holding
+                policies this thread will call learn_on_batch() on
+            minibatch_buffer_size (int): max number of train batches to store
+                in the minibatching buffer
+            num_sgd_iter (int): number of passes to learn on per train batch
+            learner_queue_size (int): max size of queue of inbound
+                train batches to this thread
+            learner_queue_timeout (int): raise an exception if the queue has
+                been empty for this long in seconds
+        """
+        threading.Thread.__init__(self)
+        self.learner_queue_size = WindowStat("size", 50)
+        self.workers = workers
+        self.inqueue = queue.Queue()
+        self.outqueue = queue.Queue()
+        self.queue_timer = TimerStat()
+        self.grad_timer = TimerStat()
+        self.load_timer = TimerStat()
+        self.load_wait_timer = TimerStat()
+        self.daemon = True
+        self.weights_updated = False
+        self.stats = {}
+        self.stopped = False
+
+    def run(self) -> None:
+        while not self.stopped:
+            self.step()
+
+    def step(self) -> None:
+        with self.queue_timer:
+            try:
+                update, num_updates, pid = self.queue.pop()
+            except queue.Empty:
+                return
+
+        lw = self.workers.local_worker().policy_map[pid].asp_sync_updates(update)
+
+        def sync_update(w, update):
+            update, _ = update
+            return w.policy_map[pid].asp_sync_updates(update)
+                
+        if self.workers.remote_workers():
+            for e in self.workers.remote_workers():
+                e.apply.remote(sync_update, update)
+
+        self.num_steps += 1
+        self.outqueue.put((num_updates))
+
+    def add_learner_metrics(self, result):
+        """Add internal metrics to a trainer result dict."""
+
+        def timer_to_ms(timer):
+            return round(1000 * timer.mean, 3)
+
+        result["info"].update({
+            "learner_queue": self.learner_queue_size.stats(),
+            "learner": copy.deepcopy(self.stats),
+            "timing_breakdown": {
+                "learner_load_time_ms": timer_to_ms(self.load_timer),
+                "learner_load_wait_time_ms": timer_to_ms(self.load_wait_timer),
+                "learner_dequeue_time_ms": timer_to_ms(self.queue_timer),
+            }
+        })
+        return result
 
 class ASPUpdateLearnerWeights:
     def __init__(self, workers, num_workers, significance_threshold):
@@ -110,7 +195,9 @@ class ASPUpdateLearnerWeights:
         self.worker_idx = {actor: idx for idx, actor in enumerate(self.workers.remote_workers())}
 
     def __call__(self, item):
-        actor, (info, samples, training_steps) = item
+        actor, (updates, info, samples, training_steps) = item
+        
+        if self.counters[actor] > min(self.counters.values()) + 50: return {}
 
         lw = self.workers.local_worker()
 
@@ -120,7 +207,6 @@ class ASPUpdateLearnerWeights:
         metrics.counters[STEPS_SAMPLED_COUNTER] += samples
 
         self.counters[actor] += 1
-
         metrics.counters[f"WorkerIteration/Worker{self.worker_idx[actor]}"] += 1
 
         global_vars = _get_global_vars()
@@ -128,31 +214,22 @@ class ASPUpdateLearnerWeights:
         actor.set_global_vars.remote(global_vars)
 
         with metrics.timers[WORKER_UPDATE_TIMER]:
-            for pid, p in lw.policy_map.items():
-                def get_update(w, significance_threshold):
-                    return w.policy_map[pid].asp_get_updates(significance_threshold)
+            for pid, update in updates.items():
+                def sync_update(w, update): w.policy_map[pid].asp_sync_updates(update)
 
-                def sync_update(w, update):
-                    update, _ = update
-                    return w.policy_map[pid].asp_sync_updates(update)
-                
-                update = actor.apply.remote(get_update, self.significance_threshold)
+                update, num_significant = update
+
+                if lw != actor: sync_update(lw, update)
 
                 if self.workers.remote_workers():
                     for e in self.workers.remote_workers():
                         if e != actor: e.apply.remote(sync_update, update)
 
-                update = ray.get(update)
-
-                if lw != actor: sync_update(lw, update)
-
-                _, num_significant = update
-
                 metrics.counters["significant_weight_updates"] += num_significant
 
         return info
 
-def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_size: int = 0):
+def LocalComputeUpdates(workers: WorkerSet, significance_threshold):
     rollouts = from_actors(workers.remote_workers())
 
     def train_on_batch(samples):
@@ -164,19 +241,19 @@ def LocalTrainOneStep(workers: WorkerSet, num_sgd_iter: int = 1, sgd_minibatch_s
         if not hasattr(worker, 'num_iterations_trained'):
             worker.num_iterations_trained = 0
 
-        if num_sgd_iter > 1:
-            info = do_minibatch_sgd(samples, {pid: worker.get_policy(pid) for pid in worker.policies_to_train}, worker, num_sgd_iter, sgd_minibatch_size, [])
-        else:
-            info = worker.learn_on_batch(samples)
+        info = worker.learn_on_batch(samples)
+        worker.foreach_trainable_policy(lambda p, pid: p.asp_accumulate_grads())
 
         worker.num_iterations_trained += 1
         info['num_iterations_trained'] = worker.num_iterations_trained
 
-        return info, samples.count, num_sgd_iter
+        updates = { pid: worker.get_policy(pid).asp_get_updates(significance_threshold) for pid in worker.policies_to_train }
 
-    info = rollouts.for_each(train_on_batch)
+        return updates, info, samples.count, 1
 
-    return info
+    res = rollouts.for_each(train_on_batch)
+
+    return res
 
 def asp_execution_plan(workers, config):
     workers.sync_weights()
@@ -184,9 +261,9 @@ def asp_execution_plan(workers, config):
     workers.foreach_trainable_policy(lambda p, pid: p.asp_sync_global_model())
 
     if "num_sgd_iter" in config:
-        train_op = LocalTrainOneStep(workers, num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
+        train_op = LocalComputeUpdates(workers, config["significance_threshold"], num_sgd_iter=config["num_sgd_iter"], sgd_minibatch_size=config["sgd_minibatch_size"])
     else:
-        train_op = LocalTrainOneStep(workers)
+        train_op = LocalComputeUpdates(workers, config["significance_threshold"])
 
     if workers.remote_workers():
         train_op = train_op.gather_async().zip_with_source_actor() \

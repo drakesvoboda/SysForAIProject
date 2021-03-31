@@ -1,6 +1,6 @@
 import os
 
-os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
+# os.environ["TUNE_RESULT_DIR"] = "/media/drake/BlackPassport/ray_results/"
 
 import ray
 import ray.rllib.agents.ppo as ppo
@@ -12,7 +12,7 @@ config = ppo.DEFAULT_CONFIG.copy()
 config["num_gpus"] = 0
 config["num_workers"] = 3
 config["num_envs_per_worker"] = 4
-trainer = ppo.PPOTrainer(config=config, env="BreakoutNoFrameskip-v4")
+trainer = ppo.PPOTrainer(config=config, env="LunarLander-v2")
 
 # Can optionally call trainer.restore(path) to load a checkpoint.
 
