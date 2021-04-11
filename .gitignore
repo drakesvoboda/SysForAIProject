@@ -188,3 +188,7 @@ project-id
 .mypy_cache/
 
 cluster.yaml
+
+# workspace
+
+workspace*

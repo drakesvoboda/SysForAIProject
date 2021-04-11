@@ -21,7 +21,7 @@ trainer = a3c.A2CTrainer(config=config, env="QbertNoFrameskip-v4")
 
 # Can optionally call trainer.restore(path) to load a checkpoint.
 
-for i in range(1000):
+for i in range(10):
    # Perform one iteration of training the policy with PPO
    result = trainer.train()
    print(pretty_print(result))

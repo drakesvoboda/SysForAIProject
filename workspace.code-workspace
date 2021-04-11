@@ -9,7 +9,7 @@
 		}
 	],
 	"settings": {
-		"python.pythonPath": "/home/drake/anaconda3/envs/spinningup/bin/python",
+		"python.pythonPath": "C:\\Users\\aanshul\\Anaconda3\\python.exe",
 		"files.watcherExclude": {
 			"**/bazel-*/**": true,
 			"**/ci/**": true,
