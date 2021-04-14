@@ -13,14 +13,14 @@ config = a3c.DEFAULT_CONFIG.copy()
 config["num_gpus"] = 0
 config["num_workers"] = 5
 config["num_envs_per_worker"] = 5
-trainer = a3c.A3CTrainer(config=config, env="QbertNoFrameskip-v4")
+trainer = a3c.A3CTrainer(config=config, env="Blackjack-v0")
 
 # Can optionally call trainer.restore(path) to load a checkpoint.
 start = int(round(time.time()))
 while True:
    # Perform one iteration of training the policy with PPO
    elapsed = int(round(time.time())) - start
-   if elapsed > 3600:
+   if elapsed > 30:
       break
    result = trainer.train()
    print(pretty_print(result))
