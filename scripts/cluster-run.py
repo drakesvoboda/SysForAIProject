@@ -12,7 +12,7 @@ runtime = 3600
 # num_workers = 5
 num_envs_per_worker = 5
 # envs = ["Acrobot-v1","CartPole-v1","Blackjack-v0"]
-envs = ["CartPole-v1"]
+envs = ["Blackjack-v0"]
 
 def run_policy(trainer):
    start = int(round(time.time()))
