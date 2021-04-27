@@ -29,3 +29,7 @@ To set up experiment on CloudLab:
     ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.2'
     ray start --address='10.10.1.1:6379' --redis-password='5241590000000000' --node-ip-address='10.10.1.3'
     ```
+
+To set up local files:
+
+1. Run `pip install -U ray` to install Ray on your local machine.
