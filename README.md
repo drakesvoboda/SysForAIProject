@@ -14,7 +14,8 @@ To set up experiment on CloudLab:
 
 1. Start a cluster on CloudLab
 1. Run the following commands to install Docker on nodes:
-   1. ```bash
+   1. 
+   ```bash
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
    sudo usermod -aG docker <UNIQNAME>
