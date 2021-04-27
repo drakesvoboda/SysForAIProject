@@ -10,8 +10,14 @@
 
 Our experiments for testing ASP and EASGD against PPO, IMPALA and A3C are run on CloudLab. Below are the setup instructions.
 
-1. Item 1
-1. Item 2
-1. Item 3
-   1. Item 3a
+To set up experiment on CloudLab:
+
+1. Start a cluster on CloudLab
+1. Run the following commands to install Docker on nodes:
+   1. '''bash
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sudo sh get-docker.sh
+   sudo usermod -aG docker <UNIQNAME>
+   sudo systemctl restart docker -f
+   '''
    1. Item 3b
